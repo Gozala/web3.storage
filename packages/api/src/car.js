@@ -1,5 +1,8 @@
+import * as cluster from './cluster.js'
 import { GATEWAY } from './constants.js'
 import { JSONResponse } from './utils/json-response.js'
+
+const LOCAL_ADD_THRESHOLD = 1024 * 1024 * 2.5
 
 // TODO: ipfs should let us ask the size of a CAR file.
 // This consumes the CAR response from ipfs to find the content-length.
@@ -46,17 +49,49 @@ export async function carGet(request, env, ctx) {
     res = new Response(res.body, { ...res, headers })
     ctx.waitUntil(cache.put(request, res.clone()))
   }
+
   return res
 }
 
 /**
  * @param {import('./user').AuthenticatedRequest} request
+ * @param {import('./env').Env} env
  */
-export async function carPost(request, env, ctx) {
+export async function carPost(request, env) {
   const { user, authToken } = request.auth
+
   console.log('User ID', user._id)
   console.log('Auth Token ID', authToken && authToken._id)
-  return new JSONResponse({})
+
+  const { headers } = request
+  const contentType = headers.get('content-type')
+
+  if (!contentType.includes('application/car')) {
+    return new Response(`${request.method} /car did not receive a car content type`, { status: 400 })
+  }
+
+  const blob = await request.blob()
+
+  // Ensure car blob.type is set; it is used by the cluster client to set the foramt=car flag on the /add call.
+  const content = blob.slice(0, blob.size, 'application/car')
+
+  const { cid } = await cluster.add(content, {
+    // When >2.5MB, use local add, because waiting for blocks to be sent to
+    // other cluster nodes can take a long time. Replication to other nodes
+    // will be done async by bitswap instead.
+    local: blob.size > LOCAL_ADD_THRESHOLD,
+  })
+
+  // Store in DB
+  // const res = await env.db.query(gql`
+  //   mutation importCar($data: importCarInput!) {
+  //     importCar(data: $data) {
+  //     }
+  //   }
+  // `, { data: parsed })
+
+  // TODO: Improve response type with pin information
+  return new JSONResponse({ ok: true, value: { cid } })
 }
 
 export async function carPut(request, env, ctx) {
